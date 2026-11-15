@@ -352,5 +352,5 @@ Hospital Affiliated to Shanghai Jiao Tong University School of Medicine
 
 ## License
 
-This code is released for academic research use. Commercial use requires
-permission from the corresponding authors.
+This project is released under the MIT License. See [LICENSE](LICENSE) for
+details.
