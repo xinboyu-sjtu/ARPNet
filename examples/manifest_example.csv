@@ -1,0 +1,5 @@
+case_id,pre_path,post_path,label,split
+case_001,data/case_001/pre.nii.gz,data/case_001/post.nii.gz,0,train
+case_002,data/case_002/pre.nii.gz,data/case_002/post.nii.gz,1,train
+case_003,data/case_003/pre.nii.gz,data/case_003/post.nii.gz,2,val
+case_004,data/case_004/pre.nii.gz,data/case_004/post.nii.gz,0,test

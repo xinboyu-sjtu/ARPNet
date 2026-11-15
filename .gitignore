@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Data and model weights
+/data/
+*.nii.gz
+*.nii
+*.pth
+*.pt
+*.ckpt
+checkpoints/*
+!checkpoints/README.md
+
+# Experiment outputs
+/runs/
+/predictions/
+*.log
+metrics.json

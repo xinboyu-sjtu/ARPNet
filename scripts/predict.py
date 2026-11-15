@@ -1,0 +1,192 @@
+#!/usr/bin/env python
+"""Run ARPNet inference on a manifest.
+
+The script writes one CSV file with Stage I metrics and Stage II
+probabilities, and optionally one predicted mask per case.
+
+Example
+-------
+python scripts/predict.py \
+    --manifest examples/manifest_example.csv \
+    --split test \
+    --stage1_ckpt runs/stage1/best.pth \
+    --stage2_ckpt runs/stage2/best.pth \
+    --out_dir predictions \
+    --eval_stage1
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import numpy as np
+import pandas as pd
+import SimpleITK as sitk
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from arpnet.data.dataset import PairedCBCTDataset
+from arpnet.data.preprocessing import keep_largest_component, write_image
+from arpnet.metrics import segmentation_scores
+from arpnet.models.arpnet import ARPNet
+from arpnet.models.stage1 import ARPNetStageI
+from arpnet.models.stage2 import ARPNetStageII
+from arpnet.utils import get_device, set_seed
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="ARPNet inference.")
+    parser.add_argument("--manifest", required=True, help="CSV manifest.")
+    parser.add_argument("--split", default=None, help="Optional split to evaluate.")
+    parser.add_argument("--stage1_ckpt", required=True, help="Stage I checkpoint.")
+    parser.add_argument("--stage2_ckpt", required=True, help="Stage II checkpoint.")
+    parser.add_argument("--out_dir", default="predictions", help="Output directory.")
+    parser.add_argument("--image_size", type=int, default=192, help="Cubic volume size.")
+    parser.add_argument("--down_scale", type=int, default=3, help="Stage I scale branches.")
+    parser.add_argument(
+        "--stage1_loss",
+        choices=("mse", "dice", "bce"),
+        default="mse",
+        help="Stage I loss; Dice/BCE apply a sigmoid before thresholding.",
+    )
+    parser.add_argument("--threshold", type=float, default=0.5, help="Mask threshold.")
+    parser.add_argument(
+        "--eval_stage1",
+        action="store_true",
+        help="Load the postoperative ground truth and compute Stage I metrics.",
+    )
+    parser.add_argument(
+        "--save_masks",
+        action="store_true",
+        help="Write one predicted NIfTI mask per case.",
+    )
+    parser.add_argument(
+        "--keep_largest",
+        action="store_true",
+        help="Keep only the largest connected component of each predicted mask.",
+    )
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size.")
+    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--device", default=None, help="Device, e.g. cuda:0 or cpu.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+    mask_dir = os.path.join(args.out_dir, "masks")
+    if args.save_masks:
+        os.makedirs(mask_dir, exist_ok=True)
+    set_seed(args.seed)
+
+    device = get_device(args.device)
+
+    dataset = PairedCBCTDataset(
+        manifest=args.manifest,
+        split=args.split,
+        image_size=args.image_size,
+        require_label=False,
+        load_post=args.eval_stage1,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+
+    # Stage I
+    stage1 = ARPNetStageI(
+        image_size=args.image_size,
+        down_scale=args.down_scale,
+    ).to(device)
+    stage1_payload = torch.load(args.stage1_ckpt, map_location=device)
+    stage1_loss = args.stage1_loss
+    if isinstance(stage1_payload, dict) and "state_dict" in stage1_payload:
+        stage1_loss = stage1_payload.get("loss", stage1_loss)
+        stage1_payload = stage1_payload["state_dict"]
+    stage1.load_state_dict(stage1_payload)
+    stage1.eval()
+
+    # Stage II
+    stage2 = ARPNetStageII(num_classes=3, in_channels=1).to(device)
+    stage2_payload = torch.load(args.stage2_ckpt, map_location=device)
+    if isinstance(stage2_payload, dict) and "state_dict" in stage2_payload:
+        stage2_payload = stage2_payload["state_dict"]
+    stage2.load_state_dict(stage2_payload)
+    stage2.eval()
+
+    model = ARPNet(
+        stage1=stage1,
+        stage2=stage2,
+        stage1_use_sigmoid=(stage1_loss != "mse"),
+        mask_threshold=args.threshold,
+    ).to(device)
+    model.eval()
+
+    rows = []
+    global_index = 0
+    with torch.no_grad():
+        for pre, post, label, case_ids in tqdm(loader, desc="Predicting"):
+            pre = pre.to(device, non_blocking=True)
+            logits, mask = model(pre, return_mask=True)
+            probabilities = torch.softmax(logits, dim=1).cpu().numpy()
+            predictions = probabilities.argmax(axis=1)
+            mask = mask.cpu().numpy()
+
+            for batch_idx, case_id in enumerate(case_ids):
+                pred_mask = mask[batch_idx, 0]
+                if args.keep_largest:
+                    pred_mask = keep_largest_component(pred_mask)
+
+                score = {}
+                if args.eval_stage1:
+                    target = post[batch_idx, 0].cpu().numpy()
+                    score = segmentation_scores(pred_mask, target)
+
+                row = {
+                    "case_id": case_id,
+                    "label": int(label[batch_idx]),
+                    "pred_label": int(predictions[batch_idx]),
+                    "prob_0": float(probabilities[batch_idx, 0]),
+                    "prob_1": float(probabilities[batch_idx, 1]),
+                    "prob_2": float(probabilities[batch_idx, 2]),
+                }
+                row.update(
+                    {
+                        "dice": score.get("dice", np.nan),
+                        "iou": score.get("iou", np.nan),
+                        "precision": score.get("precision", np.nan),
+                        "recall": score.get("recall", np.nan),
+                        "intersection": score.get("intersection", np.nan),
+                        "pred_voxels": score.get("pred_voxels", np.nan),
+                        "gt_voxels": score.get("gt_voxels", np.nan),
+                    }
+                )
+                rows.append(row)
+
+                if args.save_masks:
+                    reference = sitk.ReadImage(dataset.pre_path_at(global_index))
+                    write_image(
+                        pred_mask,
+                        reference,
+                        os.path.join(mask_dir, f"{case_id}_pred.nii.gz"),
+                    )
+                global_index += 1
+
+    frame = pd.DataFrame(rows)
+    csv_path = os.path.join(args.out_dir, "predictions.csv")
+    frame.to_csv(csv_path, index=False)
+    print(f"Saved predictions -> {csv_path}")
+    if args.save_masks:
+        print(f"Saved masks -> {mask_dir}")
+
+
+if __name__ == "__main__":
+    main()

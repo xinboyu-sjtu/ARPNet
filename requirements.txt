@@ -1,0 +1,18 @@
+# Core
+torch>=2.1,<2.5
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+scikit-learn>=1.3
+tqdm>=4.66
+SimpleITK>=2.3
+
+# 3D ResNet backbone (Stage II)
+monai>=1.3
+
+# U-Mamba backbone (Stage I)
+# mamba-ssm and causal-conv1d require CUDA and must match the installed
+# PyTorch/CUDA build.  See the installation notes in README.md.
+dynamic-network-architectures>=0.2
+mamba-ssm>=1.1.1,<2.0
+causal-conv1d>=1.1.1,<2.0
