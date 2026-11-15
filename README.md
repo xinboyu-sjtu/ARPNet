@@ -89,7 +89,7 @@ ARPNet/
 │   └── evaluate.py         # aggregate metrics and bootstrap CIs
 ├── examples/
 │   └── manifest_example.csv
-├── checkpoints/            # place trained weights here (not included)
+├── checkpoints/            # trained weights (release assets; see checkpoints/README.md)
 ├── requirements.txt
 └── README.md
 ```
@@ -302,11 +302,17 @@ absent from a resampled cohort, AUROC is computed over the classes present.
 
 ## Pretrained weights
 
-Trained weights are not distributed with this repository. See
-`checkpoints/README.md` for the expected filenames and loading instructions.
-The public module definitions are checkpoint-compatible with the models used
-for the paper: the Stage I and Stage II state dicts load strictly into
-`ARPNetStageI` and `ARPNetStageII`, respectively.
+The trained checkpoints are available from the
+[`v1.0.0` release](https://github.com/xinboyu-sjtu/ARPNet/releases/tag/v1.0.0):
+
+- [ARPNetStageI.pth](https://github.com/xinboyu-sjtu/ARPNet/releases/download/v1.0.0/ARPNetStageI.pth)
+- [ARPNetStageII.pth](https://github.com/xinboyu-sjtu/ARPNet/releases/download/v1.0.0/ARPNetStageII.pth)
+
+Place them in `checkpoints/` and pass them with `--stage1_ckpt` and
+`--stage2_ckpt`. See `checkpoints/README.md` for file sizes, checksums and
+loading examples. The public module definitions are checkpoint-compatible with
+the models used for the paper: the Stage I and Stage II state dicts load
+strictly into `ARPNetStageI` and `ARPNetStageII`, respectively.
 
 ## Citation
 
