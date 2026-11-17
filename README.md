@@ -4,15 +4,14 @@ Official PyTorch implementation of **ARPNet**, a two-stage deep learning model f
 predicting alveolar ridge morphology and the need for ancillary bone augmentation
 (NBA) after alveolar ridge preservation (ARP) from preoperative CBCT.
 
-> **Deep Learning-Based Outcome Prediction after Alveolar Ridge Preservation:
-> A Multicenter Development and Validation Study**
+> **Deep Learning-Based Preoperative Prediction of Alveolar Ridge Morphology and Need for Ancillary Bone Augmentation after Alveolar Ridge Preservation: A Multicenter Development and Validation Study**
 >
-> Xinbo Yu, Haitao Li, Ziang Wu, Hanqi Gao, Qi Yan, Dongning He, Zhen Fan,
-> Dayong Zhang, Feng Wang, Xiaojun Chen, Yiqun Wu
+> Xinbo Yu, Haitao Li, Ziang Wu, Feng Wang, Hanqi Gao, Qi Yan, Dongning He, Zhen Fan,
+> Dayong Zhang, Xiaojun Chen, Yiqun Wu
 >
 > *These authors contributed equally: Xinbo Yu, Haitao Li.*
 >
-> Corresponding authors: Yiqun Wu, Xiaojun Chen, Feng Wang.
+> Corresponding authors: Yiqun Wu, Xiaojun Chen.
 
 This repository contains the model, training, inference and evaluation code for
 the paper. It deliberately excludes the ARPFlow generative-model experiments,
@@ -28,7 +27,7 @@ network is named **ARPNet** throughout the code:
 ARPNet is trained sequentially. Stage I is trained first; its parameters are
 then frozen and Stage II is trained on the Stage I predictions.
 
-### Stage I: alveolar ridge morphology prediction
+### Stage I: Alveolar ridge morphology prediction
 
 **Input:** a cropped preoperative CBCT mask containing the extraction socket
 and 1–2 mm of surrounding bone.
@@ -48,7 +47,7 @@ divisible by `down_scale × 16` so that all scale branches have consistent
 feature-map sizes; all experiments in the paper use `192³` with
 `down_scale=3`.
 
-### Stage II: multimodal need for ancillary bone augmentation
+### Stage II: Multimodal Need for Ancillary Bone Augmentation
 
 **Inputs:** the preoperative CBCT mask, the Stage I predicted post-ARP mask,
 and an 8-dimensional clinical vector.
@@ -362,37 +361,29 @@ image-only Stage II model without clinical variables. Use
 
 ```bibtex
 @article{yu2026arpnet,
-  title   = {Deep Learning-Based Outcome Prediction after Alveolar Ridge
-             Preservation: A Multicenter Development and Validation Study},
-  author  = {Yu, Xinbo and Li, Haitao and Wu, Ziang and Gao, Hanqi and
-             Yan, Qi and He, Dongning and Fan, Zhen and Zhang, Dayong and
-             Wang, Feng and Chen, Xiaojun and Wu, Yiqun},
+  title   = {Deep Learning-Based Preoperative Prediction of Alveolar Ridge Morphology and Need for Ancillary Bone Augmentation after Alveolar Ridge Preservation: A Multicenter Development and Validation Study},
+  author  = {Yu, Xinbo and Li, Haitao and Wu, Ziang and Wang, Feng and Gao, Hanqi and
+             Yan, Qi and He, Dongning and Fan, Zhen and Zhang, Dayong and Chen, Xiaojun and Wu, Yiqun},
   year    = {2026}
 }
 ```
 
 ## Ethics and data availability
 
-The study protocol was approved by the Institutional Review Boards of Shanghai
-Ninth People's Hospital (SH9H-2025-T473-1) and the University of Hong
-Kong/Hospital Authority Hong Kong West Cluster (UW 25-577). Patient data
+The study protocol was approved by the Institutional Review Board of Shanghai
+Ninth People's Hospital (SH9H-2025-T473-1). Patient data
 cannot be shared publicly; requests should be addressed to the corresponding
 authors.
 
 ## Funding
 
-This study was supported by the Health and Medical Research Fund, the Shanghai
-Oriental Talent Leadership Program (LJ2024091), the AI + Oral and
-Craniomaxillofacial Implantology Micro-Specialty Program (DGD-2025-2), and the
-AI Interdisciplinary Research Special Program of Shanghai Ninth People's
-Hospital Affiliated to Shanghai Jiao Tong University School of Medicine
-(JYJC2025006).
+This study was supported by the AI + Oral and
+Craniomaxillofacial Implantology Micro-Specialty Program (DGD-2025-2).
 
 ## Contact
 
 - Yiqun Wu — yiqunwu@hotmail.com
 - Xiaojun Chen — xiaojunchen@sjtu.edu.cn
-- Feng Wang — diawang@hku.hk
 
 ## License
 
