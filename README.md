@@ -314,9 +314,12 @@ The script reports:
 Dice/IoU, and a percentile bootstrap 95% CI for Dice.
 
 **Stage II:** accuracy, balanced accuracy, macro precision/recall/F1, macro
-one-vs-rest AUROC, and the multi-class Brier score. Bootstrap 95% CIs are
-computed for accuracy, balanced accuracy, macro F1 and AUROC. If a class is
-absent from a resampled cohort, AUROC is computed over the classes present.
+one-vs-rest AUROC, and the multi-class Brier score. The Brier score is averaged
+over both cases and classes,
+`(1 / (N * C)) * sum_i sum_c (p_ic - y_ic)^2`, matching the paper. Bootstrap
+95% CIs are computed for accuracy, balanced accuracy, macro F1 and AUROC. If a
+class is absent from a resampled cohort, AUROC is computed over the classes
+present.
 
 ## Reproducibility notes
 

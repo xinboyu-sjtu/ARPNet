@@ -106,8 +106,13 @@ def classification_metrics(
 ) -> Dict[str, float]:
     """Accuracy, balanced accuracy, macro precision/recall/F1, AUROC, Brier.
 
-    If a class is absent from ``y_true`` (common in small external cohorts),
-    AUROC is computed over the classes that are present.
+    The multi-class Brier score is averaged over both cases and classes:
+
+        (1 / (N * C)) * sum_i sum_c (p_ic - y_ic)^2
+
+    This is the definition used in the paper.  If a class is absent from
+    ``y_true`` (common in small external cohorts), AUROC is computed over the
+    classes that are present.
     """
     y_true = np.asarray(y_true, dtype=int)
     y_pred = np.asarray(y_pred, dtype=int)
@@ -143,7 +148,8 @@ def classification_metrics(
     result["auroc_macro"] = float(np.mean(aucs)) if aucs else float("nan")
 
     one_hot = np.eye(num_classes)[y_true]
-    result["brier"] = float(np.mean(np.sum((y_prob - one_hot) ** 2, axis=1)))
+    # Average over both cases and classes, i.e. 1/(N*C) * sum_i sum_c.
+    result["brier"] = float(np.mean((y_prob - one_hot) ** 2))
     return result
 
 

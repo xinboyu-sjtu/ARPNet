@@ -39,7 +39,12 @@ def multiclass_brier(
     logits: torch.Tensor,
     target: torch.Tensor,
 ) -> torch.Tensor:
-    """Multi-class Brier score (MSE between softmax probabilities and one-hot)."""
+    """Multi-class Brier score (MSE between softmax probabilities and one-hot).
+
+    ``F.mse_loss`` averages over both the batch and the class dimension, i.e.
+    ``1 / (N * C) * sum_i sum_c (p_ic - y_ic)^2``, matching the evaluation
+    metric used in the paper.
+    """
     probabilities = F.softmax(logits, dim=1)
     target_one_hot = F.one_hot(target, num_classes=logits.shape[1]).float()
     return F.mse_loss(probabilities, target_one_hot)
