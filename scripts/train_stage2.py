@@ -1,18 +1,19 @@
 #!/usr/bin/env python
-"""Train Stage II of ARPNet (need for ancillary bone augmentation).
+"""Train Stage II of ARPNet (multimodal NBA classification).
 
-Stage I is frozen and used to generate the postoperative mask.  Stage II is a
-dual-encoder 3D ResNet-18 that takes the preoperative volume and the generated
-postoperative mask.
+Stage I is frozen and used to generate the postoperative mask.  Stage II
+combines the preoperative volume, the generated postoperative mask and an
+8-dimensional clinical vector.
 
 Example
 -------
 python scripts/train_stage2.py \
     --manifest examples/manifest_example.csv \
+    --clinical_csv examples/clinical_example.csv \
     --stage1_ckpt runs/stage1/best.pth \
     --out_dir runs/stage2 \
     --epochs 200 \
-    --loss mse
+    --loss ce
 """
 
 import argparse
@@ -29,6 +30,11 @@ from sklearn.metrics import balanced_accuracy_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from arpnet.data.clinical import (
+    CLINICAL_DIM,
+    MultimodalDataset,
+    load_clinical_csv,
+)
 from arpnet.data.dataset import PairedCBCTDataset
 from arpnet.losses import multiclass_brier, weighted_cross_entropy
 from arpnet.metrics import classification_metrics
@@ -47,9 +53,14 @@ from arpnet.utils import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train ARPNet Stage II (NBA classification)."
+        description="Train multimodal ARPNet Stage II (NBA classification)."
     )
     parser.add_argument("--manifest", required=True, help="CSV manifest.")
+    parser.add_argument(
+        "--clinical_csv",
+        required=True,
+        help="Clinical CSV with case_id, tooth_type, jaw, age and gender.",
+    )
     parser.add_argument("--stage1_ckpt", required=True, help="Stage I checkpoint.")
     parser.add_argument("--out_dir", default="runs/stage2", help="Output directory.")
     parser.add_argument("--train_split", default="train", help="Training split name.")
@@ -64,13 +75,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--epochs", type=int, default=200, help="Number of epochs.")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size.")
-    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay.")
     parser.add_argument(
         "--loss",
-        choices=("mse", "ce"),
-        default="mse",
-        help="Stage II loss. The paper uses MSE; ce enables weighted cross-entropy.",
+        choices=("ce", "mse"),
+        default="ce",
+        help=(
+            "Stage II loss. The released multimodal checkpoint was trained "
+            "with weighted cross-entropy; mse uses the multi-class Brier score."
+        ),
     )
     parser.add_argument(
         "--class_weights",
@@ -79,9 +93,32 @@ def parse_args() -> argparse.Namespace:
         default=(1.0, 2.0, 4.0),
         help="Class weights for --loss ce.",
     )
-    parser.add_argument("--hidden_dim", type=int, default=256, help="Fusion hidden width.")
-    parser.add_argument("--dropout", type=float, default=0.1, help="Fusion dropout.")
-    parser.add_argument("--depth", type=int, default=18, choices=(18, 34), help="ResNet depth.")
+    parser.add_argument(
+        "--clinical_hidden",
+        type=int,
+        default=64,
+        help="Width of the clinical embedding.",
+    )
+    parser.add_argument(
+        "--hidden_dim",
+        type=int,
+        default=1024,
+        help="Width of the first fusion layer.",
+    )
+    parser.add_argument(
+        "--fusion_dim",
+        type=int,
+        default=512,
+        help="Width of the second fusion layer.",
+    )
+    parser.add_argument("--dropout", type=float, default=0.3, help="Fusion dropout.")
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=18,
+        choices=(18, 34),
+        help="ResNet depth.",
+    )
     parser.add_argument(
         "--encoder1_ckpt",
         default=None,
@@ -95,7 +132,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--freeze_encoders",
         action="store_true",
-        help="Freeze both encoders and train only the fusion head.",
+        help=(
+            "Freeze both encoders and train only the clinical/fusion head. "
+            "The released multimodal checkpoint used this setting."
+        ),
     )
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping.")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers.")
@@ -128,22 +168,47 @@ def main() -> None:
     device = get_device(args.device)
     logger.info("Device: %s", device)
 
-    train_dataset = PairedCBCTDataset(
+    train_base = PairedCBCTDataset(
         manifest=args.manifest,
         split=args.train_split,
         image_size=args.image_size,
         balance=args.balance,
         seed=args.seed,
     )
-    val_dataset = PairedCBCTDataset(
+    val_base = PairedCBCTDataset(
         manifest=args.manifest,
         split=args.val_split,
         image_size=args.image_size,
         balance=False,
         seed=args.seed,
     )
-    logger.info("Training samples: %d %s", len(train_dataset), train_dataset.class_counts())
-    logger.info("Validation samples: %d %s", len(val_dataset), val_dataset.class_counts())
+
+    clinical_data, age_mean, age_std = load_clinical_csv(
+        args.clinical_csv,
+        fit_case_ids=train_base.unique_case_ids(),
+    )
+    train_dataset = MultimodalDataset(train_base, clinical_data)
+    val_dataset = MultimodalDataset(val_base, clinical_data)
+
+    missing_train = sum(
+        1 for case_id in train_base.unique_case_ids()
+        if case_id not in clinical_data
+    )
+    missing_val = sum(
+        1 for case_id in val_base.unique_case_ids()
+        if case_id not in clinical_data
+    )
+    logger.info(
+        "Clinical data: %d records | age mean=%.2f std=%.2f | "
+        "missing train=%d val=%d",
+        len(clinical_data),
+        age_mean,
+        age_std,
+        missing_train,
+        missing_val,
+    )
+    logger.info("Training samples: %d %s", len(train_dataset), train_base.class_counts())
+    logger.info("Validation samples: %d %s", len(val_dataset), val_base.class_counts())
 
     train_loader = DataLoader(
         train_dataset,
@@ -175,13 +240,19 @@ def main() -> None:
     for parameter in stage1.parameters():
         parameter.requires_grad = False
     logger.info("Loaded Stage I checkpoint: %s", args.stage1_ckpt)
-    logger.info("Stage I output activation: %s", "sigmoid" if stage1_loss != "mse" else "raw")
+    logger.info(
+        "Stage I output activation: %s",
+        "sigmoid" if stage1_loss != "mse" else "raw",
+    )
 
     model = ARPNetStageII(
         num_classes=3,
         in_channels=1,
         depth=args.depth,
+        clinical_dim=CLINICAL_DIM,
+        clinical_hidden=args.clinical_hidden,
         hidden_dim=args.hidden_dim,
+        fusion_dim=args.fusion_dim,
         dropout=args.dropout,
         encoder1_ckpt=args.encoder1_ckpt,
         encoder2_ckpt=args.encoder2_ckpt,
@@ -219,9 +290,10 @@ def main() -> None:
             desc=f"Epoch {epoch + 1}/{args.epochs} train",
             leave=False,
         )
-        for pre, _, label, _ in progress:
+        for pre, _, label, clinical, _ in progress:
             pre = pre.to(device, non_blocking=True)
             label = label.to(device, non_blocking=True)
+            clinical = clinical.to(device, non_blocking=True)
 
             with torch.no_grad():
                 post_pred = stage1(pre)
@@ -231,7 +303,7 @@ def main() -> None:
 
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=args.amp):
-                logits = model(pre, post_pred)
+                logits = model(pre, post_pred, clinical)
                 if args.loss == "mse":
                     loss = multiclass_brier(logits, label)
                 else:
@@ -256,20 +328,21 @@ def main() -> None:
         val_loss_meter = AverageMeter()
         y_true, y_pred, y_prob = [], [], []
         with torch.no_grad():
-            for pre, _, label, _ in tqdm(
+            for pre, _, label, clinical, _ in tqdm(
                 val_loader,
                 desc=f"Epoch {epoch + 1}/{args.epochs} val",
                 leave=False,
             ):
                 pre = pre.to(device, non_blocking=True)
                 label = label.to(device, non_blocking=True)
+                clinical = clinical.to(device, non_blocking=True)
 
                 post_pred = stage1(pre)
                 if stage1_loss != "mse":
                     post_pred = torch.sigmoid(post_pred)
                 post_pred = (post_pred >= 0.5).float()
 
-                logits = model(pre, post_pred)
+                logits = model(pre, post_pred, clinical)
                 if args.loss == "mse":
                     loss = multiclass_brier(logits, label)
                 else:
@@ -321,6 +394,9 @@ def main() -> None:
                 down_scale=args.down_scale,
                 stage1_loss=stage1_loss,
                 stage2_loss=args.loss,
+                clinical_dim=CLINICAL_DIM,
+                clinical_age_mean=age_mean,
+                clinical_age_std=age_std,
             )
             logger.info(
                 "Saved new best checkpoint (balanced accuracy=%.4f)",
@@ -336,6 +412,9 @@ def main() -> None:
             down_scale=args.down_scale,
             stage1_loss=stage1_loss,
             stage2_loss=args.loss,
+            clinical_dim=CLINICAL_DIM,
+            clinical_age_mean=age_mean,
+            clinical_age_std=age_std,
         )
         save_json(history, os.path.join(args.out_dir, "history.json"))
 

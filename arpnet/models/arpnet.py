@@ -1,4 +1,4 @@
-"""End-to-end ARPNet: Stage I morphology prediction + Stage II NBA prediction."""
+"""End-to-end ARPNet: Stage I morphology prediction + multimodal Stage II."""
 
 from typing import Tuple, Union
 
@@ -11,18 +11,19 @@ from .stage2 import ARPNetStageII
 
 
 class ARPNet(nn.Module):
-    """Two-stage ARPNet.
+    """Two-stage multimodal ARPNet.
 
     Stage I is frozen; it predicts the post-ARP ridge mask from the
-    preoperative volume.  Stage II classifies the need for ancillary bone
-    augmentation from the preoperative volume and the predicted mask.
+    preoperative volume.  Stage II combines the preoperative volume, the
+    predicted mask and a clinical vector to classify the need for ancillary
+    bone augmentation.
 
     Parameters
     ----------
     stage1:
         Trained :class:`ARPNetStageI`.
     stage2:
-        Trained :class:`ARPNetStageII`.
+        Trained multimodal :class:`ARPNetStageII`.
     stage1_use_sigmoid:
         Set to True if Stage I was trained with Dice or BCE loss (logits).
         The MSE variant used in the paper outputs raw values in [0, 1].
@@ -58,21 +59,26 @@ class ARPNet(nn.Module):
     def forward(
         self,
         pre: torch.Tensor,
+        clinical: torch.Tensor,
         return_mask: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Return ``(nba_logits, predicted_mask)``.
+        """Return ``(nba_logits, predicted_mask)`` or ``nba_logits``.
 
         ``nba_logits`` has shape ``[B, 3]``; ``predicted_mask`` has shape
-        ``[B, 1, D, H, W]``.
+        ``[B, 1, D, H, W]``; ``clinical`` has shape ``[B, 8]``.
         """
         mask = self.predict_mask(pre)
-        logits = self.stage2(pre, mask)
+        logits = self.stage2(pre, mask, clinical)
         if return_mask:
             return logits, mask
         return logits
 
     @torch.no_grad()
-    def predict_proba(self, pre: torch.Tensor) -> torch.Tensor:
+    def predict_proba(
+        self,
+        pre: torch.Tensor,
+        clinical: torch.Tensor,
+    ) -> torch.Tensor:
         """Return NBA class probabilities of shape ``[B, 3]``."""
-        logits = self.forward(pre)
+        logits = self.forward(pre, clinical)
         return F.softmax(logits, dim=1)

@@ -189,3 +189,7 @@ class PairedCBCTDataset(Dataset):
             return {}
         labels = self.frame["label"].astype(int).tolist()
         return {label: labels.count(label) for label in sorted(set(labels))}
+
+    def unique_case_ids(self):
+        """Return the unique case IDs in the selected split."""
+        return self.frame["case_id"].astype(str).tolist()

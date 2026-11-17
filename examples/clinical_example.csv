@@ -1,0 +1,5 @@
+case_id,tooth_type,jaw,age,gender
+case_001,molar,mand,52,0
+case_002,premolar,max,47,1
+case_003,incisor,max,35,0
+case_004,molar,mand,61,1

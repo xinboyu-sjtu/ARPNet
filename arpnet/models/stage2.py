@@ -1,9 +1,18 @@
-"""Stage II of ARPNet: need-for-ancillary-bone-augmentation (NBA) prediction.
+"""Stage II of ARPNet: multimodal NBA prediction.
 
-Stage II takes the preoperative CBCT mask and the Stage I predicted post-ARP
-mask.  Each volume is encoded by a 3D ResNet-18; the two 512-d feature vectors
-are concatenated and passed through a two-layer fully connected classifier
-that outputs three NBA classes:
+Stage II combines three sources of information:
+
+1. the preoperative CBCT mask,
+2. the Stage I predicted post-ARP mask,
+3. an 8-dimensional clinical vector (tooth type, jaw, gender, age).
+
+Each volume is encoded by a 3D ResNet-18.  The two 512-d image features are
+concatenated with a 64-d clinical embedding, and the resulting 1088-d vector is
+passed through a two-layer fully connected classifier:
+
+    1088 -> 1024 -> 512 -> 3
+
+The three NBA classes are:
 
     class 0: implant placement without ancillary bone augmentation
     class 1: implant placement with simultaneous bone augmentation / OSFE
@@ -66,7 +75,7 @@ class ResNet3DEncoder(nn.Module):
 
 
 class ARPNetStageII(nn.Module):
-    """Dual-encoder 3D ResNet classifier for NBA prediction.
+    """Multimodal dual-encoder 3D ResNet classifier for NBA prediction.
 
     Parameters
     ----------
@@ -76,16 +85,23 @@ class ARPNetStageII(nn.Module):
         Number of image channels (default: 1).
     depth:
         ResNet depth, 18 or 34.
+    clinical_dim:
+        Dimension of the clinical vector (default: 8).
+    clinical_hidden:
+        Width of the clinical embedding (default: 64).
     hidden_dim:
-        Width of the fusion hidden layer.
+        Width of the first fusion layer (default: 1024).
+    fusion_dim:
+        Width of the second fusion layer (default: 512).
     dropout:
-        Dropout probability in the fusion head.
+        Dropout probability in the fusion head (default: 0.3).
     encoder1_ckpt, encoder2_ckpt:
-        Optional paths to pretrained ``ResNet3DEncoder`` state dicts.  The
-        expected keys are ``net.*`` (the format used by the original
-        ``ResNet3D0_fix.pth`` / ``ResNet3D0_no_fix.pth`` checkpoints).
+        Optional pretrained ``ResNet3DEncoder`` state dicts.  The expected keys
+        are ``net.*``.  ``encoder1`` processes the generated postoperative
+        mask; ``encoder2`` processes the preoperative volume.
     freeze_encoders:
-        Freeze both encoders after loading.  Only the fusion head is trained.
+        Freeze both encoders after loading.  The released multimodal checkpoint
+        was trained with frozen encoders and only the fusion head trainable.
     """
 
     def __init__(
@@ -93,8 +109,11 @@ class ARPNetStageII(nn.Module):
         num_classes: int = 3,
         in_channels: int = 1,
         depth: int = 18,
-        hidden_dim: int = 256,
-        dropout: float = 0.1,
+        clinical_dim: int = 8,
+        clinical_hidden: int = 64,
+        hidden_dim: int = 1024,
+        fusion_dim: int = 512,
+        dropout: float = 0.3,
         encoder1_ckpt: Optional[str] = None,
         encoder2_ckpt: Optional[str] = None,
         freeze_encoders: bool = False,
@@ -114,12 +133,22 @@ class ARPNetStageII(nn.Module):
         self._load_encoder(self.encoder1, encoder1_ckpt)
         self._load_encoder(self.encoder2, encoder2_ckpt)
 
-        feature_dim = 512
+        self.clinical_proj = nn.Sequential(
+            nn.LayerNorm(clinical_dim),
+            nn.Linear(clinical_dim, clinical_hidden),
+            nn.ReLU(inplace=True),
+        )
+
+        fusion_in = 512 * 2 + clinical_hidden
         self.fusion = nn.Sequential(
-            nn.Linear(feature_dim * 2, hidden_dim),
+            nn.LayerNorm(fusion_in),
+            nn.Linear(fusion_in, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes),
+            nn.Linear(hidden_dim, fusion_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(fusion_dim, num_classes),
         )
 
         if freeze_encoders:
@@ -143,6 +172,7 @@ class ARPNetStageII(nn.Module):
         self,
         pre: torch.Tensor,
         post_pred: torch.Tensor,
+        clinical: torch.Tensor,
     ) -> torch.Tensor:
         """Return NBA logits.
 
@@ -152,10 +182,13 @@ class ARPNetStageII(nn.Module):
             Preoperative volume, ``[B, 1, D, H, W]``.
         post_pred:
             Stage I predicted post-ARP mask, ``[B, 1, D, H, W]``.
+        clinical:
+            Clinical vector, ``[B, clinical_dim]``.
         """
         # The original ARPNet checkpoint expects encoder1 to process the
         # generated postoperative mask and encoder2 the preoperative volume.
         feat_post = self.encoder1(post_pred)
         feat_pre = self.encoder2(pre)
-        fused = torch.cat([feat_post, feat_pre], dim=1)
+        feat_clinical = self.clinical_proj(clinical)
+        fused = torch.cat([feat_post, feat_pre, feat_clinical], dim=1)
         return self.fusion(fused)

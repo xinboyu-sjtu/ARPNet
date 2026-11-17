@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-"""Run ARPNet inference on a manifest.
+"""Run multimodal ARPNet inference on a manifest.
 
-The script writes one CSV file with Stage I metrics and Stage II
-probabilities, and optionally one predicted mask per case.
+The script writes one CSV file with Stage I metrics and Stage II probabilities,
+and optionally one predicted mask per case.
 
 Example
 -------
 python scripts/predict.py \
     --manifest examples/manifest_example.csv \
+    --clinical_csv examples/clinical_example.csv \
     --split test \
     --stage1_ckpt runs/stage1/best.pth \
     --stage2_ckpt runs/stage2/best.pth \
@@ -29,6 +30,11 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from arpnet.data.clinical import (
+    CLINICAL_DIM,
+    MultimodalDataset,
+    load_clinical_csv,
+)
 from arpnet.data.dataset import PairedCBCTDataset
 from arpnet.data.preprocessing import keep_largest_component, write_image
 from arpnet.metrics import segmentation_scores
@@ -39,8 +45,13 @@ from arpnet.utils import get_device, set_seed
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ARPNet inference.")
+    parser = argparse.ArgumentParser(description="Multimodal ARPNet inference.")
     parser.add_argument("--manifest", required=True, help="CSV manifest.")
+    parser.add_argument(
+        "--clinical_csv",
+        required=True,
+        help="Clinical CSV with case_id, tooth_type, jaw, age and gender.",
+    )
     parser.add_argument("--split", default=None, help="Optional split to evaluate.")
     parser.add_argument("--stage1_ckpt", required=True, help="Stage I checkpoint.")
     parser.add_argument("--stage2_ckpt", required=True, help="Stage II checkpoint.")
@@ -86,13 +97,29 @@ def main() -> None:
 
     device = get_device(args.device)
 
-    dataset = PairedCBCTDataset(
+    base_dataset = PairedCBCTDataset(
         manifest=args.manifest,
         split=args.split,
         image_size=args.image_size,
         require_label=False,
         load_post=args.eval_stage1,
     )
+
+    # Stage II checkpoint metadata contains the age standardization statistics
+    # used during training.  Reuse them so that inference encoding matches.
+    stage2_payload = torch.load(args.stage2_ckpt, map_location=device)
+    stage2_meta = stage2_payload if isinstance(stage2_payload, dict) else {}
+    if "state_dict" in stage2_meta:
+        stage2_state = stage2_meta["state_dict"]
+    else:
+        stage2_state = stage2_meta
+
+    clinical_data, age_mean, age_std = load_clinical_csv(
+        args.clinical_csv,
+        age_mean=stage2_meta.get("clinical_age_mean"),
+        age_std=stage2_meta.get("clinical_age_std"),
+    )
+    dataset = MultimodalDataset(base_dataset, clinical_data)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -115,11 +142,12 @@ def main() -> None:
     stage1.eval()
 
     # Stage II
-    stage2 = ARPNetStageII(num_classes=3, in_channels=1).to(device)
-    stage2_payload = torch.load(args.stage2_ckpt, map_location=device)
-    if isinstance(stage2_payload, dict) and "state_dict" in stage2_payload:
-        stage2_payload = stage2_payload["state_dict"]
-    stage2.load_state_dict(stage2_payload)
+    stage2 = ARPNetStageII(
+        num_classes=3,
+        in_channels=1,
+        clinical_dim=CLINICAL_DIM,
+    ).to(device)
+    stage2.load_state_dict(stage2_state)
     stage2.eval()
 
     model = ARPNet(
@@ -133,9 +161,13 @@ def main() -> None:
     rows = []
     global_index = 0
     with torch.no_grad():
-        for pre, post, label, case_ids in tqdm(loader, desc="Predicting"):
+        for pre, post, label, clinical, case_ids in tqdm(
+            loader, desc="Predicting"
+        ):
             pre = pre.to(device, non_blocking=True)
-            logits, mask = model(pre, return_mask=True)
+            clinical = clinical.to(device, non_blocking=True)
+
+            logits, mask = model(pre, clinical, return_mask=True)
             probabilities = torch.softmax(logits, dim=1).cpu().numpy()
             predictions = probabilities.argmax(axis=1)
             mask = mask.cpu().numpy()
@@ -152,6 +184,7 @@ def main() -> None:
 
                 row = {
                     "case_id": case_id,
+                    "clinical_available": int(str(case_id) in clinical_data),
                     "label": int(label[batch_idx]),
                     "pred_label": int(predictions[batch_idx]),
                     "prob_0": float(probabilities[batch_idx, 0]),
@@ -172,7 +205,9 @@ def main() -> None:
                 rows.append(row)
 
                 if args.save_masks:
-                    reference = sitk.ReadImage(dataset.pre_path_at(global_index))
+                    reference = sitk.ReadImage(
+                        base_dataset.pre_path_at(global_index)
+                    )
                     write_image(
                         pred_mask,
                         reference,

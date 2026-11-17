@@ -20,7 +20,7 @@ baseline comparisons and other exploratory scripts. The complete two-stage
 network is named **ARPNet** throughout the code:
 
 - `ARPNetStageI` — alveolar ridge morphology prediction.
-- `ARPNetStageII` — three-class NBA classification.
+- `ARPNetStageII` — multimodal three-class NBA classification.
 - `ARPNet` — end-to-end wrapper that runs Stage I and Stage II together.
 
 ## Model overview
@@ -48,9 +48,10 @@ divisible by `down_scale × 16` so that all scale branches have consistent
 feature-map sizes; all experiments in the paper use `192³` with
 `down_scale=3`.
 
-### Stage II: need for ancillary bone augmentation
+### Stage II: multimodal need for ancillary bone augmentation
 
-**Inputs:** the preoperative CBCT mask and the Stage I predicted post-ARP mask.
+**Inputs:** the preoperative CBCT mask, the Stage I predicted post-ARP mask,
+and an 8-dimensional clinical vector.
 **Output:** three NBA classes:
 
 | Class | Definition |
@@ -59,11 +60,20 @@ feature-map sizes; all experiments in the paper use `192³` with
 | 1 | Implant placement with simultaneous bone augmentation and/or osteotome sinus floor elevation (OSFE) |
 | 2 | Implant placement after complex bone augmentation (staged GBR or lateral sinus floor elevation) |
 
-Two 3D ResNet-18 encoders extract a 512-d feature vector from each volume.
-The vectors are concatenated (1024-d) and passed through a fully connected
-head (`1024 → 256 → 3`). The paper uses MSE on the softmax probabilities
-(the multi-class Brier score) as the Stage II loss; weighted cross-entropy is
-also available with `--loss ce` for the variant used in some internal runs.
+The clinical vector encodes tooth type (molar, premolar, incisor, canine;
+4 one-hot values), jaw (maxilla or mandible; 2 one-hot values), gender (1
+value), and standardized age (1 value).  Two 3D ResNet-18 encoders extract a
+512-d feature vector from each volume.  The image features are concatenated
+with a 64-d clinical embedding (512 + 512 + 64 = 1088), and the resulting
+vector is passed through a fully connected head:
+
+```text
+1088 -> 1024 -> 512 -> 3
+```
+
+The released multimodal checkpoint was trained with weighted cross-entropy
+(class weights 1:2:4 for classes 0–2).  `--loss mse` is also available and uses
+the multi-class Brier score.
 
 ## Repository layout
 
@@ -73,10 +83,11 @@ ARPNet/
 │   ├── models/
 │   │   ├── blocks.py       # Mamba layer, residual blocks, scale encoder/decoder
 │   │   ├── stage1.py       # ARPNetStageI
-│   │   ├── stage2.py       # ARPNetStageII and 3D ResNet encoder
+│   │   ├── stage2.py       # multimodal ARPNetStageII and 3D ResNet encoder
 │   │   └── arpnet.py       # end-to-end ARPNet wrapper
 │   ├── data/
 │   │   ├── dataset.py      # paired preoperative/postoperative dataset
+│   │   ├── clinical.py     # clinical-variable encoding and multimodal dataset
 │   │   └── preprocessing.py # NIfTI resampling, centre cropping, largest component
 │   ├── losses.py           # MSE, Dice, BCE, Brier, weighted CE
 │   ├── metrics.py          # segmentation and classification metrics
@@ -84,11 +95,12 @@ ARPNet/
 ├── scripts/
 │   ├── prepare_crops.py    # crop registered mask pairs to 192^3
 │   ├── train_stage1.py     # train Stage I
-│   ├── train_stage2.py     # train Stage II with frozen Stage I
+│   ├── train_stage2.py     # train multimodal Stage II with frozen Stage I
 │   ├── predict.py          # end-to-end inference
 │   └── evaluate.py         # aggregate metrics and bootstrap CIs
 ├── examples/
-│   └── manifest_example.csv
+│   ├── manifest_example.csv
+│   └── clinical_example.csv
 ├── checkpoints/            # trained weights (release assets; see checkpoints/README.md)
 ├── requirements.txt
 └── README.md
@@ -169,6 +181,27 @@ case_004,data/case_004/pre.nii.gz,data/case_004/post.nii.gz,0,test
 
 A template is provided in `examples/manifest_example.csv`.
 
+### Clinical data
+
+Stage II also requires a clinical CSV with the following columns:
+
+```csv
+case_id,tooth_type,jaw,age,gender
+case_001,molar,mand,52,0
+case_002,premolar,max,47,1
+```
+
+- `case_id`: must match the `case_id` in the imaging manifest.
+- `tooth_type`: `molar`, `premolar`, `incisor`, or `canine`.
+- `jaw`: `max` or `mand`.
+- `age`: age in years. It is standardized using the mean and standard deviation
+  of the training split.
+- `gender`: `0` or `1`.
+
+A template is provided in `examples/clinical_example.csv`. Cases without a
+clinical record receive an all-zero vector; the prediction CSV records
+`clinical_available` so these cases can be identified.
+
 ### Cropping helper
 
 ```bash
@@ -216,35 +249,35 @@ sigmoid before thresholding.
 ```bash
 python scripts/train_stage2.py \
     --manifest data/crops/manifest.csv \
+    --clinical_csv data/clinical.csv \
     --stage1_ckpt runs/stage1/best.pth \
     --out_dir runs/stage2 \
     --epochs 200 \
     --batch_size 2 \
-    --lr 1e-5 \
-    --loss mse
-```
-
-Stage I is frozen and runs in evaluation mode. The best checkpoint is selected
-by validation balanced accuracy and written to `runs/stage2/best.pth`.
-
-Optional pretrained encoders (for example, encoders pretrained on a related
-segmentation task) can be supplied with:
-
-```bash
-python scripts/train_stage2.py ... \
+    --lr 3e-4 \
+    --loss ce \
     --encoder1_ckpt checkpoints/resnet3d_post.pth \
     --encoder2_ckpt checkpoints/resnet3d_pre.pth \
     --freeze_encoders
 ```
 
+Stage I is frozen and runs in evaluation mode. The released multimodal
+checkpoint was trained with frozen pretrained encoders and weighted
+cross-entropy; only the clinical projection and fusion head were trainable.
+The best checkpoint is selected by validation balanced accuracy and written to
+`runs/stage2/best.pth`.
+
 `encoder1` processes the generated postoperative mask; `encoder2` processes
 the preoperative volume. This order matches the original ARPNet checkpoints.
+The checkpoint stores the age mean and standard deviation so that inference
+uses exactly the same clinical encoding as training.
 
 ## Inference
 
 ```bash
 python scripts/predict.py \
     --manifest data/crops/manifest.csv \
+    --clinical_csv data/clinical.csv \
     --split test \
     --stage1_ckpt runs/stage1/best.pth \
     --stage2_ckpt runs/stage2/best.pth \
@@ -256,8 +289,9 @@ python scripts/predict.py \
 Outputs:
 
 - `predictions/predictions.csv`: case-level Stage II probabilities, predicted
-  labels, and (with `--eval_stage1`) Stage I Dice/IoU/precision/recall and
-  voxel counts.
+  labels, `clinical_available` (1 if a clinical record was found, 0 if the
+  zero-vector fallback was used), and (with `--eval_stage1`) Stage I
+  Dice/IoU/precision/recall and voxel counts.
 - `predictions/masks/<case_id>_pred.nii.gz`: predicted postoperative masks
   (with `--save_masks`).
 
@@ -293,26 +327,36 @@ absent from a resampled cohort, AUROC is computed over the classes present.
 - Class-balanced oversampling used in the original training pipeline can be
   enabled with `--balance`. Validation is never balanced.
 - Stage I input is mapped to `{-1, +1}`; Stage II input is the same
-  preoperative volume and a binary Stage I mask thresholded at 0.5.
-- The paper uses MSE for both stages. `--loss ce` in Stage II enables the
-  weighted cross-entropy variant (`1.0`, `2.0`, `4.0` for classes 0–2).
+  preoperative volume, a binary Stage I mask thresholded at 0.5, and an
+  8-dimensional clinical vector.
+- Stage I uses MSE. The released multimodal Stage II checkpoint was trained
+  with weighted cross-entropy (`1.0`, `2.0`, `4.0` for classes 0–2);
+  `--loss mse` switches to the multi-class Brier score.
+- The clinical vector is built from tooth type (4 one-hot), jaw (2 one-hot),
+  gender (1), and age standardized with training-set statistics (1). The age
+  mean and standard deviation are stored in the Stage II checkpoint.
+- The released multimodal checkpoint used frozen pretrained ResNet-3D encoders;
+  only the clinical projection and fusion head were trained.
 - Training Stage I on 192³ volumes with batch size 1 requires a GPU with at
   least 24 GB of memory. Reduce the volume size only if the preprocessing is
   adjusted consistently.
 
 ## Pretrained weights
 
-The trained checkpoints are available from the
-[`v1.0.0` release](https://github.com/xinboyu-sjtu/ARPNet/releases/tag/v1.0.0):
+The trained checkpoints are distributed as GitHub Release assets:
 
-- [ARPNetStageI.pth](https://github.com/xinboyu-sjtu/ARPNet/releases/download/v1.0.0/ARPNetStageI.pth)
-- [ARPNetStageII.pth](https://github.com/xinboyu-sjtu/ARPNet/releases/download/v1.0.0/ARPNetStageII.pth)
+- Stage I: [ARPNetStageI.pth](https://github.com/xinboyu-sjtu/ARPNet/releases/download/v1.0.0/ARPNetStageI.pth)
+- Multimodal Stage II: [ARPNetStageII_multimodal.pth](https://github.com/xinboyu-sjtu/ARPNet/releases/download/v1.1.0/ARPNetStageII_multimodal.pth)
 
 Place them in `checkpoints/` and pass them with `--stage1_ckpt` and
 `--stage2_ckpt`. See `checkpoints/README.md` for file sizes, checksums and
-loading examples. The public module definitions are checkpoint-compatible with
-the models used for the paper: the Stage I and Stage II state dicts load
-strictly into `ARPNetStageI` and `ARPNetStageII`, respectively.
+loading examples. The multimodal Stage II checkpoint stores the clinical
+encoding metadata (`clinical_dim`, `clinical_age_mean`, `clinical_age_std`) and
+loads strictly into `ARPNetStageII`.
+
+The earlier `ARPNetStageII.pth` asset in the `v1.0.0` release corresponds to the
+image-only Stage II model without clinical variables. Use
+`ARPNetStageII_multimodal.pth` for the multimodal model described above.
 
 ## Citation
 
