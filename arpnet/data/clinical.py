@@ -65,7 +65,12 @@ def load_clinical_csv(
             fit_ids = {str(value) for value in fit_case_ids}
             fit_frame = frame[frame["case_id"].astype(str).isin(fit_ids)]
             if len(fit_frame) == 0:
-                fit_frame = frame
+                raise ValueError(
+                    "None of the supplied training case IDs matched the "
+                    "clinical CSV. Refusing to compute age statistics from "
+                    "the full CSV because it may contain validation/test "
+                    "cases."
+                )
         age_mean = float(fit_frame["age"].astype(float).mean())
         age_std = float(fit_frame["age"].astype(float).std(ddof=0))
         if not np.isfinite(age_std) or age_std == 0:

@@ -49,6 +49,7 @@ from arpnet.utils import (
     save_json,
     set_seed,
     setup_logger,
+    validate_encoder_initialization,
 )
 
 
@@ -165,6 +166,15 @@ def parse_args() -> argparse.Namespace:
             "before training (for example the released multimodal weights)."
         ),
     )
+    parser.add_argument(
+        "--allow_missing_clinical",
+        action="store_true",
+        help=(
+            "Allow cases without a clinical record and fill their vectors "
+            "with zeros. By default, missing clinical data raise an error in "
+            "the formal training pipeline."
+        ),
+    )
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping.")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -263,6 +273,13 @@ def main() -> None:
         missing_train,
         missing_val,
     )
+    if (missing_train or missing_val) and not args.allow_missing_clinical:
+        raise ValueError(
+            f"Missing clinical records: {missing_train} training and "
+            f"{missing_val} validation cases. The paper's formal pipeline "
+            "assumes complete clinical data. Provide the missing records or "
+            "pass --allow_missing_clinical to use the zero-vector fallback."
+        )
     logger.info("Training samples: %d %s", len(train_dataset), train_base.class_counts())
     logger.info("Validation samples: %d %s", len(val_dataset), val_base.class_counts())
     logger.info(
@@ -327,18 +344,13 @@ def main() -> None:
         model.load_state_dict(init_state, strict=True)
         logger.info("Initialized Stage II from %s", args.init_stage2_ckpt)
 
-    if (
-        (args.freeze_encoders or args.unfreeze_last_block)
-        and not args.encoder1_ckpt
-        and not args.encoder2_ckpt
-        and not args.init_stage2_ckpt
-    ):
-        raise ValueError(
-            "No encoder checkpoints or full Stage II initialization were "
-            "provided. Provide --encoder1_ckpt/--encoder2_ckpt or "
-            "--init_stage2_ckpt, or pass --no_unfreeze_last_block to train "
-            "all encoder parameters from scratch."
-        )
+    validate_encoder_initialization(
+        encoder1_ckpt=args.encoder1_ckpt,
+        encoder2_ckpt=args.encoder2_ckpt,
+        init_stage2_ckpt=args.init_stage2_ckpt,
+        freeze_encoders=args.freeze_encoders,
+        unfreeze_last_block=args.unfreeze_last_block,
+    )
 
     logger.info("Trainable parameters: %s", f"{count_parameters(model):,}")
 

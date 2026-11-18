@@ -106,6 +106,40 @@ class AverageMeter:
         return self.total / self.count if self.count else 0.0
 
 
+def validate_encoder_initialization(
+    encoder1_ckpt: Optional[str],
+    encoder2_ckpt: Optional[str],
+    init_stage2_ckpt: Optional[str],
+    freeze_encoders: bool,
+    unfreeze_last_block: bool,
+) -> None:
+    """Require both encoders when a frozen/fine-tuning strategy is used.
+
+    A full Stage II checkpoint initializes both encoders and is therefore a
+    valid alternative to the two standalone encoder checkpoints.
+    """
+    if not (freeze_encoders or unfreeze_last_block):
+        return
+    if init_stage2_ckpt:
+        return
+
+    missing = []
+    if not encoder1_ckpt:
+        missing.append("--encoder1_ckpt")
+    if not encoder2_ckpt:
+        missing.append("--encoder2_ckpt")
+    if missing:
+        raise ValueError(
+            "Both encoder checkpoints are required when freeze_encoders or "
+            "unfreeze_last_block is enabled, because otherwise one encoder "
+            "would remain randomly initialized and frozen. Missing: "
+            + ", ".join(missing)
+            + ". Provide both checkpoints, provide --init_stage2_ckpt, "
+            "or pass --no_unfreeze_last_block to train all encoder "
+            "parameters from scratch."
+        )
+
+
 class EarlyStopping:
     """Early stopping on a validation metric.
 

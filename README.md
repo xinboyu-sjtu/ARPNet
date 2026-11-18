@@ -70,11 +70,11 @@ softmax probability (Class I, II or III) is the prediction.
 | 1 | Implant placement with simultaneous bone augmentation and/or osteotome sinus floor elevation (OSFE) |
 | 2 | Implant placement after complex bone augmentation (staged GBR or lateral sinus floor elevation) |
 
-**Multimodal Stage II head (Representative Model).** Tooth type (molar, premolar, 
-incisor, canine; 4 one-hot values), jaw (maxilla or mandible; 2 one-hot values), 
-gender (1 value), and standardized age (1 value) are one-hot encoded and age is 
-z-score normalized, giving an 8-dimensional clinical vector. 
-A clinical branch (LayerNorm, Linear 8→64, ReLU) produces a 64-dimensional vector, 
+**Multimodal Stage II head (Representative Model).** Tooth type (molar, premolar,
+incisor, canine; 4 one-hot values) and jaw (maxilla or mandible; 2 one-hot values)
+are one-hot encoded. Gender is binary encoded (1 value), and age is z-score
+normalized (1 value), giving an 8-dimensional clinical vector.
+A clinical branch (LayerNorm, Linear 8→64, ReLU) produces a 64-dimensional vector,
 which is concatenated with the 1024-dimensional imaging vector (1088 dimensions). 
 A three-layer classifier (1088→1024→512→3, dropout 0.3) outputs the class scores. 
 The final residual block of each image encoder is unfrozen during training; 
@@ -103,7 +103,7 @@ Validation and test sets were not oversampled.
 
 **Calibration.** True labels are one-hot encoded and predicted probabilities flattened 
 across the three classes (micro-averaging); probabilities are binned into five equal-width 
-bins and the observed fraction of positives is computed per bin (scikit-learn).
+bins and the observed fraction of positives is computed per bin.
 
 ## Training settings
 
@@ -292,14 +292,15 @@ python scripts/train_stage1.py \
     --manifest data/crops/manifest.csv \
     --out_dir runs/stage1 \
     --epochs 200 \
+    --patience 50 \
     --batch_size 1 \
-    --lr 1e-4 \
+    --lr 1e-5 \
     --loss mse
 ```
 
-The best checkpoint (selected by validation Dice) is written to
-`runs/stage1/best.pth`. The training history and resolved arguments are saved
-alongside it.
+The best checkpoint is selected by **minimum validation loss** and written to
+`runs/stage1/best.pth`; validation Dice is logged for monitoring. The training
+history and resolved arguments are saved alongside it.
 
 For the loss-function comparison reported in the revision:
 
@@ -320,24 +321,35 @@ python scripts/train_stage2.py \
     --stage1_ckpt runs/stage1/best.pth \
     --out_dir runs/stage2 \
     --epochs 200 \
-    --batch_size 2 \
-    --lr 3e-4 \
-    --loss ce \
+    --patience 50 \
+    --batch_size 4 \
+    --lr 1e-5 \
+    --loss mse \
     --encoder1_ckpt checkpoints/resnet3d_post.pth \
     --encoder2_ckpt checkpoints/resnet3d_pre.pth \
-    --freeze_encoders
+    --unfreeze_last_block
 ```
 
-Stage I is frozen and runs in evaluation mode. The released multimodal
-checkpoint was trained with frozen pretrained encoders and weighted
-cross-entropy; only the clinical projection and fusion head were trainable.
-The best checkpoint is selected by validation balanced accuracy and written to
-`runs/stage2/best.pth`.
+Stage I is frozen and runs in evaluation mode. The paper configuration uses
+MSE on softmax probabilities versus one-hot labels, batch size 4, learning rate
+1e-5, early-stopping patience 50, and the checkpoint with the **minimum
+validation loss**. Stage II training-set oversampling is enabled by default
+(fixed one-time 1:1:1 set; disable with `--no_balance`); validation and test
+sets are not oversampled.
 
 `encoder1` processes the generated postoperative mask; `encoder2` processes
-the preoperative volume. This order matches the original ARPNet checkpoints.
-The checkpoint stores the age mean and standard deviation so that inference
-uses exactly the same clinical encoding as training.
+the preoperative volume. Both encoder checkpoints are required when
+`--unfreeze_last_block` or `--freeze_encoders` is used, or a full Stage II
+checkpoint can be supplied with `--init_stage2_ckpt`. The checkpoint stores the
+age mean and standard deviation so that inference uses exactly the same
+clinical encoding as training.
+
+The previously released multimodal checkpoint was trained with weighted
+cross-entropy, fully frozen encoders, batch size 2 with gradient accumulation,
+and best-balanced-accuracy checkpoint selection. The full historical
+configuration is recorded in `checkpoints/weights_manifest.json`; the two key
+switches are `--loss ce --freeze_encoders`. This is intentionally separate from
+the paper-configuration command above.
 
 ## Inference
 
@@ -367,6 +379,10 @@ predicted mask. Use `--stage1_loss dice` or `--stage1_loss bce` if Stage I was
 trained with a sigmoid output; the script also reads the loss name from the
 Stage I checkpoint metadata when available.
 
+For the image-only control model (Supplementary Table 1), add
+`--model_type image_only` and omit `--clinical_csv`; use the legacy image-only
+Stage II checkpoint. The default `--model_type multimodal` path is unchanged.
+
 ## Evaluation
 
 ```bash
@@ -381,21 +397,26 @@ The script reports:
 **Stage I:** per-case Dice, mIoU, precision and recall (mean ± SD), pooled
 Dice/IoU, and a percentile bootstrap 95% CI for Dice.
 
-**Stage II:** accuracy, balanced accuracy, macro precision/recall/F1, macro
-one-vs-rest AUROC, and the multi-class Brier score. The Brier score is averaged
-over both cases and classes,
-`(1 / (N * C)) * sum_i sum_c (p_ic - y_ic)^2`, matching the paper. Bootstrap
-95% CIs are computed for accuracy, balanced accuracy, macro F1 and AUROC. If a
-class is absent from a resampled cohort, AUROC is computed over the classes
-present.
+**Stage II:** accuracy, balanced accuracy, support-weighted precision/recall/F1,
+macro precision/recall/F1, macro one-vs-rest AUROC, the multi-class Brier score,
+the Brier skill score (BSS), and the micro-averaged expected calibration error
+(ECE) with five equal-width bins. The Brier score is averaged over both cases
+and classes, `(1 / (N * C)) * sum_i sum_c (p_ic - y_ic)^2`, matching the paper.
+The Brier reference model uses the training-set priors (140/224, 62/224,
+22/224). A bootstrap 95% CI is computed for every Stage II metric (1000
+resamples by default); point estimates are always computed on the complete test
+set, not from the bootstrap mean. If a class is absent from a resampled cohort,
+AUROC is computed over the classes present. The five-bin micro-averaged
+calibration data are saved to `calibration_curve.csv`.
 
 ## Reproducibility notes
 
 - Splits are patient-level and are supplied through the `split` column of the
   manifest; the code does not create splits automatically.
 - The default seed is 42. `set_seed` controls Python, NumPy and PyTorch.
-- Class-balanced oversampling used in the original training pipeline can be
-  enabled with `--balance`. Validation is never balanced.
+- Class-balanced oversampling is enabled by default for Stage II training and
+  is constructed once before training; disable it with `--no_balance`.
+  Validation and test sets are never balanced.
 - Stage I input is mapped to `{-1, +1}`; Stage II input is the same
   preoperative volume, a binary Stage I mask thresholded at 0.5, and an
   8-dimensional clinical vector.
@@ -403,7 +424,7 @@ present.
   with weighted cross-entropy (`1.0`, `2.0`, `4.0` for classes 0–2);
   `--loss mse` switches to the multi-class Brier score.
 - The clinical vector is built from tooth type (4 one-hot), jaw (2 one-hot),
-  gender (1), and age standardized with training-set statistics (1). The age
+  gender binary (1), and age standardized with training-set statistics (1). The age
   mean and standard deviation are stored in the Stage II checkpoint.
 - The released multimodal checkpoint used frozen pretrained ResNet-3D encoders;
   only the clinical projection and fusion head were trained.
@@ -427,6 +448,11 @@ loads strictly into `ARPNetStageII`.
 The earlier `ARPNetStageII.pth` asset in the `v1.0.0` release corresponds to the
 image-only Stage II model without clinical variables. Use
 `ARPNetStageII_multimodal.pth` for the multimodal model described above.
+
+Note: the released multimodal checkpoint was trained with the historical
+weighted-CE/frozen-encoder configuration. It is not a retraining under the
+paper configuration (MSE, batch 4, last-block fine-tuning); see
+`checkpoints/weights_manifest.json` for the exact distinction.
 
 ## Citation
 
