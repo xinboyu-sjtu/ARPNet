@@ -2,9 +2,10 @@
 
 Official PyTorch implementation of **ARPNet**, a two-stage deep learning model for
 predicting alveolar ridge morphology and the need for ancillary bone augmentation
-(NBA) after alveolar ridge preservation (ARP) from preoperative CBCT.
+(NBA) after alveolar ridge preservation (ARP) from pre-operative cone-beam computed tomography (CBCT) scans.
 
-> **Deep Learning-Based Preoperative Prediction of Alveolar Ridge Morphology and Need for Ancillary Bone Augmentation after Alveolar Ridge Preservation: A Multicenter Development and Validation Study**
+> **Deep Learning-Based Preoperative Prediction of Alveolar Ridge Morphology and Need for Ancillary Bone Augmentation after Alveolar Ridge Preservation:
+> A Multicenter Development and Validation Study**
 >
 > Xinbo Yu, Haitao Li, Ziang Wu, Feng Wang, Hanqi Gao, Qi Yan, Dongning He, Zhen Fan,
 > Dayong Zhang, Xiaojun Chen, Yiqun Wu
@@ -13,32 +14,39 @@ predicting alveolar ridge morphology and the need for ancillary bone augmentatio
 >
 > Corresponding authors: Yiqun Wu, Xiaojun Chen.
 
-This repository contains the model, training, inference and evaluation code for
+This repository contains the model, training, inference, and evaluation code for
 the paper. It deliberately excludes the ARPFlow generative-model experiments,
 baseline comparisons and other exploratory scripts. The complete two-stage
 network is named **ARPNet** throughout the code:
 
-- `ARPNetStageI` — alveolar ridge morphology prediction.
-- `ARPNetStageII` — multimodal three-class NBA classification.
-- `ARPNet` — end-to-end wrapper that runs Stage I and Stage II together.
+- `ARPNetStageI` — Alveolar Ridge Morphology Prediction.
+- `ARPNetStageII` — Multimodal Three-class NBA Classification Prediction.
+- `ARPNet` — End-to-end wrapper that runs Stage I and Stage II together.
 
 ## Model overview
 
 ARPNet is trained sequentially. Stage I is trained first; its parameters are
 then frozen and Stage II is trained on the Stage I predictions.
 
-### Stage I: Alveolar ridge morphology prediction
+## Model design and architecture
 
-**Input:** a cropped preoperative CBCT mask containing the extraction socket
-and 1–2 mm of surrounding bone.
-**Output:** the predicted healed post-ARP mask at the same location.
+**Stage I (Morphology Prediction).** 
 
-Stage I uses three parallel branches operating at full, 2/3 and 1/3 scale.
-Each branch is a U-Mamba-style encoder–decoder: residual convolutional stages
-are interleaved with Mamba state-space layers, and skip connections recover the
-fine spatial detail. The branch outputs are fused coarse-to-fine with 1×1
-convolutions, added to a global residual, and passed through a final 1×1
-refiner. The paper uses mean squared error (MSE) as the Stage I loss.
+**Input:** 3D binary mask of the pre-extraction 
+socket, 192×192×192 voxels. 
+
+**Output:** The predicted healed post-ARP mask at the same location.
+
+Three parallel branches process the input at full (192³), two-thirds (128³) 
+and one-third (64³) resolution, each with an independent U-Mamba-based encoder. 
+An attention mechanism within each branch enhances features of the centered 
+socket and suppresses less relevant peripheral regions. 
+Each branch downsamples four times, halving the resolution each time (full: 
+192→96→48→24→12; two-thirds: 128→64→32→16→8; one-third: 64→32→16→8→4), with 
+feature channels increasing 64→128→192→256. 
+The branches are upsampled back to 192³ voxels and merged by 1×1 convolutions; 
+a final 1×1 convolution outputs the predicted 3D mask of the post-ARP healed site.
+The paper uses mean squared error (MSE) as the Stage I loss.
 
 The axial dimension of the volume is used as the channel dimension of the 2D
 convolutional backbone. `ARPNetStageI` accepts a standard
@@ -47,11 +55,14 @@ divisible by `down_scale × 16` so that all scale branches have consistent
 feature-map sizes; all experiments in the paper use `192³` with
 `down_scale=3`.
 
-### Stage II: Multimodal Need for Ancillary Bone Augmentation
+**Stage II (NBA Classification).** 
 
-**Inputs:** the preoperative CBCT mask, the Stage I predicted post-ARP mask,
-and an 8-dimensional clinical vector.
-**Output:** three NBA classes:
+**Inputs:** The pre-extraction socket mask and the 
+Stage I-predicted post-ARP mask. Each is encoded by a 3D ResNet-18 (downsampling 
+and global average pooling) into a 512-dimensional vector. The class with the highest 
+softmax probability (Class I, II or III) is the prediction.
+
+**Output:** Three NBA classes:
 
 | Class | Definition |
 | --- | --- |
@@ -59,20 +70,77 @@ and an 8-dimensional clinical vector.
 | 1 | Implant placement with simultaneous bone augmentation and/or osteotome sinus floor elevation (OSFE) |
 | 2 | Implant placement after complex bone augmentation (staged GBR or lateral sinus floor elevation) |
 
-The clinical vector encodes tooth type (molar, premolar, incisor, canine;
-4 one-hot values), jaw (maxilla or mandible; 2 one-hot values), gender (1
-value), and standardized age (1 value).  Two 3D ResNet-18 encoders extract a
-512-d feature vector from each volume.  The image features are concatenated
-with a 64-d clinical embedding (512 + 512 + 64 = 1088), and the resulting
-vector is passed through a fully connected head:
-
-```text
-1088 -> 1024 -> 512 -> 3
-```
+**Multimodal Stage II head (Representative Model).** Tooth type (molar, premolar, 
+incisor, canine; 4 one-hot values), jaw (maxilla or mandible; 2 one-hot values), 
+gender (1 value), and standardized age (1 value) are one-hot encoded and age is 
+z-score normalized, giving an 8-dimensional clinical vector. 
+A clinical branch (LayerNorm, Linear 8→64, ReLU) produces a 64-dimensional vector, 
+which is concatenated with the 1024-dimensional imaging vector (1088 dimensions). 
+A three-layer classifier (1088→1024→512→3, dropout 0.3) outputs the class scores. 
+The final residual block of each image encoder is unfrozen during training; 
+all other settings match the image-only model.
 
 The released multimodal checkpoint was trained with weighted cross-entropy
 (class weights 1:2:4 for classes 0–2).  `--loss mse` is also available and uses
 the multi-class Brier score.
+
+**Image-only Stage II head (Comparison Model).** The two 512-dimensional vectors are 
+concatenated into a 1024-dimensional vector and passed through Linear (1024→256) + 
+ReLU + dropout (0.1), then Linear (256→3), giving one score per NBA class.
+
+**Stage II Class Balancing.** Random oversampling was applied to the Stage II training 
+set only. Let N_c be the number of original training cases in class c (c = 0, 1, 2 for 
+Class I, II, III), N_max = max(N_0, N_1, N_2), and m_c = N_max − N_c. All original cases 
+were kept; for each class, m_c cases were drawn uniformly at random, independently and 
+with replacement from that class's original cases and added to it. The resulting training 
+set had N_max cases per class (3 × N_max in total; ratio 1:1:1). A given case in class c 
+appeared 1 + K times, with K ~ Binomial(m_c, 1/N_c), so its expected number of appearances 
+was N_max/N_c. In this study, N = 140, 62 and 22 for Classes I–III, so 78 Class II and 
+118 Class III cases were added, giving 420 training cases. The balanced set was built once 
+before training; each epoch reshuffled this fixed set into mini-batches, with no new 
+oversampling per epoch. This is dataset-level duplication, not a class-weighted loss. 
+Validation and test sets were not oversampled.
+
+**Calibration.** True labels are one-hot encoded and predicted probabilities flattened 
+across the three classes (micro-averaging); probabilities are binned into five equal-width 
+bins and the observed fraction of positives is computed per bin (scikit-learn).
+
+## Training settings
+
+| Setting | Stage I | Stage II |
+|---|---|---|
+| Input | Cropped 3D mask of the pre-extraction socket | Same mask, Stage I-predicted post-ARP mask, and four clinical variables (tooth type, jaw, gender, age) |
+| Output | 3D mask of the healed post-ARP site | Probabilities for the three NBA classes |
+| Optimizer | Adam | Adam |
+| Learning rate | 1×10⁻⁵ | 1×10⁻⁵ |
+| Loss | Mean squared error | Mean squared error |
+| Batch size | 1 | 4 |
+| Epochs | Up to 200; early stopping (patience 50, validation loss) | Up to 200; early stopping (patience 50, validation loss) |
+| Checkpoint | Lowest validation loss | Lowest validation loss |
+
+Split: 6:2:2 (224:75:75 patients). Hardware: 2× NVIDIA RTX 3090. Environment: Python 3.10; 
+PyTorch 2.1.1 with CUDA 11.8; MONAI 1.4.0; mamba-ssm 1.1.1; causal-conv1d 1.1.1; 
+dynamic-network-architectures ≥0.2; NumPy ≥1.24; pandas ≥2.0; SciPy ≥1.10; scikit-learn ≥1.3; 
+tqdm ≥4.66; and SimpleITK ≥2.3.
+
+## Size distribution of the post-extraction socket (cropped training images, n = 224)
+
+The socket was defined as the postoperative bone region absent from the preoperative mask. 
+All values are percentages of the cropped image.
+
+| Measure | Mean ± SD (%) | Median (%) | IQR (%) | 5th–95th percentile (%) |
+|---|:---:|:---:|:---:|:---:|
+| Socket 3D bounding-box volume / image volume | 36.22 ± 17.84 | 34.43 | 20.94–49.22 | 12.01–67.71 |
+| Socket maximal cross-sectional area / slice area | 30.66 ± 17.28 | 25.93 | 17.07–40.98 | 8.55–64.08 |
+| Socket cross-sectional height / image height | 47.53 ± 13.82 | 46.88 | 37.50–57.29 | 26.20–71.72 |
+| Socket cross-sectional width / image width | 61.16 ± 22.47 | 60.94 | 41.67–76.30 | 29.17–100.00 |
+| Preoperative bone (x ≠ 0) 3D bounding-box volume / image volume | 41.90 ± 18.36 | 40.45 | 25.50–57.03 | 16.87–71.88 |
+
+IQR, interquartile range; SD, standard deviation.
+
+## Data availability
+
+Clinical and radiographic data are not publicly available due to hospital and patient privacy regulations. See the Data Availability Statement of the article.
 
 ## Repository layout
 
