@@ -104,3 +104,59 @@ class AverageMeter:
     @property
     def average(self) -> float:
         return self.total / self.count if self.count else 0.0
+
+
+class EarlyStopping:
+    """Early stopping on a validation metric.
+
+    Parameters
+    ----------
+    patience:
+        Number of epochs without improvement before stopping.
+    min_delta:
+        Minimum change to qualify as an improvement.
+    mode:
+        ``"min"`` for losses, ``"max"`` for scores.
+    """
+
+    def __init__(
+        self,
+        patience: int = 50,
+        min_delta: float = 0.0,
+        mode: str = "min",
+    ) -> None:
+        if mode not in ("min", "max"):
+            raise ValueError("mode must be 'min' or 'max'.")
+        self.patience = int(patience)
+        self.min_delta = float(min_delta)
+        self.mode = mode
+        self.best: Optional[float] = None
+        self.counter = 0
+        self.stopped = False
+
+    def step(self, value: float) -> bool:
+        """Update the state and return True if the metric improved."""
+        value = float(value)
+        if not np.isfinite(value):
+            self.counter += 1
+            self.stopped = self.counter >= self.patience
+            return False
+
+        if self.best is None:
+            self.best = value
+            self.counter = 0
+            return True
+
+        if self.mode == "min":
+            improved = value < self.best - self.min_delta
+        else:
+            improved = value > self.best + self.min_delta
+
+        if improved:
+            self.best = value
+            self.counter = 0
+            return True
+
+        self.counter += 1
+        self.stopped = self.counter >= self.patience
+        return False

@@ -31,6 +31,7 @@ from arpnet.metrics import dice_score_tensor
 from arpnet.models.stage1 import ARPNetStageI
 from arpnet.utils import (
     AverageMeter,
+    EarlyStopping,
     count_parameters,
     get_device,
     save_checkpoint,
@@ -51,8 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image_size", type=int, default=192, help="Cubic volume size.")
     parser.add_argument("--down_scale", type=int, default=3, help="Number of scale branches.")
     parser.add_argument("--epochs", type=int, default=200, help="Number of epochs.")
+    parser.add_argument("--patience", type=int, default=50, help="Early stopping patience.")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size.")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
+    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay.")
     parser.add_argument(
         "--loss",
@@ -156,7 +158,10 @@ def main() -> None:
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
 
     history = {"train_loss": [], "val_dice": [], "val_loss": []}
-    best_dice = -1.0
+    early_stopping = EarlyStopping(
+        patience=args.patience,
+        mode="min",
+    )
 
     for epoch in range(args.epochs):
         model.train()
@@ -227,23 +232,31 @@ def main() -> None:
             mean_dice,
         )
 
-        if mean_dice > best_dice:
-            best_dice = mean_dice
+        val_loss = val_loss_meter.average
+        improved = early_stopping.step(val_loss)
+
+        if improved:
             save_checkpoint(
                 model,
                 os.path.join(args.out_dir, "best.pth"),
                 epoch=epoch + 1,
-                val_dice=best_dice,
+                val_loss=val_loss,
+                val_dice=mean_dice,
                 image_size=args.image_size,
                 down_scale=args.down_scale,
                 loss=args.loss,
             )
-            logger.info("Saved new best checkpoint (val_dice=%.4f)", best_dice)
+            logger.info(
+                "Saved new best checkpoint (val_loss=%.6f, val_dice=%.4f)",
+                val_loss,
+                mean_dice,
+            )
 
         save_checkpoint(
             model,
             os.path.join(args.out_dir, "last.pth"),
             epoch=epoch + 1,
+            val_loss=val_loss,
             val_dice=mean_dice,
             image_size=args.image_size,
             down_scale=args.down_scale,
@@ -251,7 +264,19 @@ def main() -> None:
         )
         save_json(history, os.path.join(args.out_dir, "history.json"))
 
-    logger.info("Training finished. Best validation Dice: %.4f", best_dice)
+        if early_stopping.stopped:
+            logger.info(
+                "Early stopping at epoch %d (no validation-loss improvement "
+                "for %d epochs).",
+                epoch + 1,
+                args.patience,
+            )
+            break
+
+    logger.info(
+        "Training finished. Best validation loss: %.6f",
+        early_stopping.best if early_stopping.best is not None else float("nan"),
+    )
 
 
 if __name__ == "__main__":

@@ -77,6 +77,15 @@ class PairedCBCTDataset(Dataset):
                     f"Manifest is missing required column '{column}': {manifest}"
                 )
 
+        if "split" in frame.columns:
+            split_per_case = frame.groupby("case_id")["split"].nunique()
+            if (split_per_case > 1).any():
+                leaking = split_per_case[split_per_case > 1].index.tolist()
+                raise ValueError(
+                    "Case IDs assigned to more than one split: "
+                    + ", ".join(str(value) for value in leaking[:10])
+                )
+
         if require_label and "label" not in frame.columns:
             raise ValueError(
                 f"Manifest is missing required column 'label': {manifest}"
@@ -189,6 +198,17 @@ class PairedCBCTDataset(Dataset):
             return {}
         labels = self.frame["label"].astype(int).tolist()
         return {label: labels.count(label) for label in sorted(set(labels))}
+
+    def selected_class_counts(self) -> Dict[int, int]:
+        """Return class counts over the selected (possibly oversampled) rows."""
+        if "label" not in self.frame.columns:
+            return {}
+        labels = self.frame["label"].astype(int).tolist()
+        counts: Dict[int, int] = {}
+        for index in self.indices:
+            label = labels[index]
+            counts[label] = counts.get(label, 0) + 1
+        return {label: counts[label] for label in sorted(counts)}
 
     def unique_case_ids(self):
         """Return the unique case IDs in the selected split."""

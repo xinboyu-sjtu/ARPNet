@@ -14,6 +14,7 @@ venv/
 *.ckpt
 checkpoints/*
 !checkpoints/README.md
+!checkpoints/weights_manifest.json
 
 # Experiment outputs
 /runs/

@@ -42,6 +42,7 @@ from arpnet.models.stage1 import ARPNetStageI
 from arpnet.models.stage2 import ARPNetStageII
 from arpnet.utils import (
     AverageMeter,
+    EarlyStopping,
     count_parameters,
     get_device,
     save_checkpoint,
@@ -74,16 +75,18 @@ def parse_args() -> argparse.Namespace:
         help="Stage I loss used to decide whether to apply a sigmoid.",
     )
     parser.add_argument("--epochs", type=int, default=200, help="Number of epochs.")
-    parser.add_argument("--batch_size", type=int, default=2, help="Batch size.")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
+    parser.add_argument("--patience", type=int, default=50, help="Early stopping patience.")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size.")
+    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay.")
     parser.add_argument(
         "--loss",
-        choices=("ce", "mse"),
-        default="ce",
+        choices=("mse", "ce"),
+        default="mse",
         help=(
-            "Stage II loss. The released multimodal checkpoint was trained "
-            "with weighted cross-entropy; mse uses the multi-class Brier score."
+            "Stage II loss. The paper uses MSE on softmax probabilities vs "
+            "one-hot labels; ce enables weighted cross-entropy for the legacy "
+            "released checkpoint."
         ),
     )
     parser.add_argument(
@@ -133,8 +136,33 @@ def parse_args() -> argparse.Namespace:
         "--freeze_encoders",
         action="store_true",
         help=(
-            "Freeze both encoders and train only the clinical/fusion head. "
-            "The released multimodal checkpoint used this setting."
+            "Freeze both encoders completely and train only the "
+            "clinical/fusion head. Use this for the legacy released "
+            "checkpoint, whose encoders were kept frozen."
+        ),
+    )
+    parser.add_argument(
+        "--unfreeze_last_block",
+        dest="unfreeze_last_block",
+        action="store_true",
+        default=True,
+        help=(
+            "Freeze all encoder parameters except the last residual block "
+            "(layer4). This is the paper's Stage II fine-tuning strategy."
+        ),
+    )
+    parser.add_argument(
+        "--no_unfreeze_last_block",
+        dest="unfreeze_last_block",
+        action="store_false",
+        help="Do not unfreeze layer4; train all encoder parameters.",
+    )
+    parser.add_argument(
+        "--init_stage2_ckpt",
+        default=None,
+        help=(
+            "Optional full Stage II checkpoint used to initialize the model "
+            "before training (for example the released multimodal weights)."
         ),
     )
     parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping.")
@@ -144,8 +172,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp", action="store_true", help="Enable mixed precision.")
     parser.add_argument(
         "--balance",
+        dest="balance",
         action="store_true",
-        help="Replicate minority classes in the training split.",
+        default=True,
+        help=(
+            "Replicate minority classes in the training split (default: on). "
+            "The paper uses a fixed, one-time oversampled training set."
+        ),
+    )
+    parser.add_argument(
+        "--no_balance",
+        dest="balance",
+        action="store_false",
+        help="Disable training-set oversampling.",
     )
     return parser.parse_args()
 
@@ -160,6 +199,8 @@ def freeze_frozen_bn(model: nn.Module) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.freeze_encoders and args.unfreeze_last_block:
+        args.unfreeze_last_block = False
     os.makedirs(args.out_dir, exist_ok=True)
     logger = setup_logger(os.path.join(args.out_dir, "train.log"))
     save_json(vars(args), os.path.join(args.out_dir, "args.json"))
@@ -183,9 +224,24 @@ def main() -> None:
         seed=args.seed,
     )
 
+    init_state = None
+    init_age_mean = None
+    init_age_std = None
+    if args.init_stage2_ckpt:
+        init_payload = torch.load(args.init_stage2_ckpt, map_location=device)
+        init_meta = init_payload if isinstance(init_payload, dict) else {}
+        if "state_dict" in init_meta:
+            init_state = init_meta["state_dict"]
+        else:
+            init_state = init_payload
+        init_age_mean = init_meta.get("clinical_age_mean")
+        init_age_std = init_meta.get("clinical_age_std")
+
     clinical_data, age_mean, age_std = load_clinical_csv(
         args.clinical_csv,
         fit_case_ids=train_base.unique_case_ids(),
+        age_mean=init_age_mean,
+        age_std=init_age_std,
     )
     train_dataset = MultimodalDataset(train_base, clinical_data)
     val_dataset = MultimodalDataset(val_base, clinical_data)
@@ -209,6 +265,13 @@ def main() -> None:
     )
     logger.info("Training samples: %d %s", len(train_dataset), train_base.class_counts())
     logger.info("Validation samples: %d %s", len(val_dataset), val_base.class_counts())
+    logger.info(
+        "Training entries after fixed oversampling: %d (raw: %d) | "
+        "balanced class counts: %s",
+        len(train_dataset),
+        len(train_base),
+        train_base.selected_class_counts(),
+    )
 
     train_loader = DataLoader(
         train_dataset,
@@ -257,7 +320,26 @@ def main() -> None:
         encoder1_ckpt=args.encoder1_ckpt,
         encoder2_ckpt=args.encoder2_ckpt,
         freeze_encoders=args.freeze_encoders,
+        unfreeze_last_block=args.unfreeze_last_block,
     ).to(device)
+
+    if init_state is not None:
+        model.load_state_dict(init_state, strict=True)
+        logger.info("Initialized Stage II from %s", args.init_stage2_ckpt)
+
+    if (
+        (args.freeze_encoders or args.unfreeze_last_block)
+        and not args.encoder1_ckpt
+        and not args.encoder2_ckpt
+        and not args.init_stage2_ckpt
+    ):
+        raise ValueError(
+            "No encoder checkpoints or full Stage II initialization were "
+            "provided. Provide --encoder1_ckpt/--encoder2_ckpt or "
+            "--init_stage2_ckpt, or pass --no_unfreeze_last_block to train "
+            "all encoder parameters from scratch."
+        )
+
     logger.info("Trainable parameters: %s", f"{count_parameters(model):,}")
 
     optimizer = torch.optim.Adam(
@@ -279,7 +361,10 @@ def main() -> None:
         "val_balanced_accuracy": [],
         "val_auroc": [],
     }
-    best_balanced_accuracy = -1.0
+    early_stopping = EarlyStopping(
+        patience=args.patience,
+        mode="min",
+    )
 
     for epoch in range(args.epochs):
         model.train()
@@ -383,13 +468,17 @@ def main() -> None:
             metrics["auroc_macro"],
         )
 
-        if balanced > best_balanced_accuracy:
-            best_balanced_accuracy = balanced
+        val_loss = val_loss_meter.average
+        improved = early_stopping.step(val_loss)
+
+        if improved:
             save_checkpoint(
                 model,
                 os.path.join(args.out_dir, "best.pth"),
                 epoch=epoch + 1,
-                val_balanced_accuracy=best_balanced_accuracy,
+                val_loss=val_loss,
+                val_accuracy=accuracy,
+                val_balanced_accuracy=balanced,
                 image_size=args.image_size,
                 down_scale=args.down_scale,
                 stage1_loss=stage1_loss,
@@ -399,14 +488,17 @@ def main() -> None:
                 clinical_age_std=age_std,
             )
             logger.info(
-                "Saved new best checkpoint (balanced accuracy=%.4f)",
-                best_balanced_accuracy,
+                "Saved new best checkpoint (val_loss=%.6f, val_acc=%.4f)",
+                val_loss,
+                accuracy,
             )
 
         save_checkpoint(
             model,
             os.path.join(args.out_dir, "last.pth"),
             epoch=epoch + 1,
+            val_loss=val_loss,
+            val_accuracy=accuracy,
             val_balanced_accuracy=balanced,
             image_size=args.image_size,
             down_scale=args.down_scale,
@@ -418,9 +510,18 @@ def main() -> None:
         )
         save_json(history, os.path.join(args.out_dir, "history.json"))
 
+        if early_stopping.stopped:
+            logger.info(
+                "Early stopping at epoch %d (no validation-loss improvement "
+                "for %d epochs).",
+                epoch + 1,
+                args.patience,
+            )
+            break
+
     logger.info(
-        "Training finished. Best validation balanced accuracy: %.4f",
-        best_balanced_accuracy,
+        "Training finished. Best validation loss: %.6f",
+        early_stopping.best if early_stopping.best is not None else float("nan"),
     )
 
 

@@ -100,8 +100,14 @@ class ARPNetStageII(nn.Module):
         are ``net.*``.  ``encoder1`` processes the generated postoperative
         mask; ``encoder2`` processes the preoperative volume.
     freeze_encoders:
-        Freeze both encoders after loading.  The released multimodal checkpoint
-        was trained with frozen encoders and only the fusion head trainable.
+        Freeze both encoders completely.  This matches the legacy image-only
+        and multimodal checkpoints released before the paper-aligned training
+        configuration.
+    unfreeze_last_block:
+        Freeze all encoder parameters except the last residual block
+        (``layer4``) of each encoder.  This is the paper's Stage II
+        fine-tuning strategy when pretrained encoder weights are available.
+        ``freeze_encoders`` and ``unfreeze_last_block`` are mutually exclusive.
     """
 
     def __init__(
@@ -117,8 +123,13 @@ class ARPNetStageII(nn.Module):
         encoder1_ckpt: Optional[str] = None,
         encoder2_ckpt: Optional[str] = None,
         freeze_encoders: bool = False,
+        unfreeze_last_block: bool = False,
     ) -> None:
         super().__init__()
+        if freeze_encoders and unfreeze_last_block:
+            raise ValueError(
+                "freeze_encoders and unfreeze_last_block are mutually exclusive."
+            )
         self.encoder1 = ResNet3DEncoder(
             in_channels=in_channels,
             depth=depth,
@@ -156,6 +167,15 @@ class ARPNetStageII(nn.Module):
                 parameter.requires_grad = False
             for parameter in self.encoder2.parameters():
                 parameter.requires_grad = False
+        elif unfreeze_last_block:
+            for parameter in self.encoder1.parameters():
+                parameter.requires_grad = False
+            for parameter in self.encoder2.parameters():
+                parameter.requires_grad = False
+            for parameter in self.encoder1.net.layer4.parameters():
+                parameter.requires_grad = True
+            for parameter in self.encoder2.net.layer4.parameters():
+                parameter.requires_grad = True
 
     @staticmethod
     def _load_encoder(encoder: ResNet3DEncoder, path: Optional[str]) -> None:
@@ -191,4 +211,75 @@ class ARPNetStageII(nn.Module):
         feat_pre = self.encoder2(pre)
         feat_clinical = self.clinical_proj(clinical)
         fused = torch.cat([feat_post, feat_pre, feat_clinical], dim=1)
+        return self.fusion(fused)
+
+
+class ARPNetStageIIImageOnly(nn.Module):
+    """Image-only dual-encoder control model for NBA prediction.
+
+    This is the earlier image-only Stage II architecture: two 3D ResNet-18
+    encoders (512 features each) and a ``1024 -> 256 -> 3`` classifier with
+    dropout 0.1.  It is kept as an ablation/control model and for compatibility
+    with the legacy image-only checkpoint.
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 3,
+        in_channels: int = 1,
+        depth: int = 18,
+        hidden_dim: int = 256,
+        dropout: float = 0.1,
+        encoder1_ckpt: Optional[str] = None,
+        encoder2_ckpt: Optional[str] = None,
+        freeze_encoders: bool = False,
+    ) -> None:
+        super().__init__()
+        self.encoder1 = ResNet3DEncoder(
+            in_channels=in_channels,
+            depth=depth,
+            num_classes=num_classes,
+        )
+        self.encoder2 = ResNet3DEncoder(
+            in_channels=in_channels,
+            depth=depth,
+            num_classes=num_classes,
+        )
+
+        self._load_encoder(self.encoder1, encoder1_ckpt)
+        self._load_encoder(self.encoder2, encoder2_ckpt)
+
+        self.fusion = nn.Sequential(
+            nn.Linear(512 * 2, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_classes),
+        )
+
+        if freeze_encoders:
+            for parameter in self.encoder1.parameters():
+                parameter.requires_grad = False
+            for parameter in self.encoder2.parameters():
+                parameter.requires_grad = False
+
+    @staticmethod
+    def _load_encoder(encoder: ResNet3DEncoder, path: Optional[str]) -> None:
+        if path is None:
+            return
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Encoder checkpoint not found: {path}")
+        state_dict = torch.load(path, map_location="cpu")
+        if isinstance(state_dict, dict) and "state_dict" in state_dict:
+            state_dict = state_dict["state_dict"]
+        encoder.load_state_dict(state_dict, strict=True)
+
+    def forward(
+        self,
+        pre: torch.Tensor,
+        post_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return NBA logits without clinical variables."""
+        feat_post = self.encoder1(post_pred)
+        feat_pre = self.encoder2(pre)
+        fused = torch.cat([feat_post, feat_pre], dim=1)
         return self.fusion(fused)

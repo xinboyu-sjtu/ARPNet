@@ -1,0 +1,65 @@
+{
+  "stage1": {
+    "asset": "ARPNetStageI.pth",
+    "release": "v1.0.0",
+    "architecture": "ARPNetStageI (three-branch U-Mamba morphology network)",
+    "format": "raw PyTorch state_dict",
+    "actual_training_config": {
+      "loss": "MSE",
+      "note": "The original checkpoint predates the paper-aligned training script. The optimizer, learning rate, batch size, early-stopping criterion and checkpoint-selection rule are not fully documented in the released artifact."
+    },
+    "paper_config": {
+      "optimizer": "Adam",
+      "learning_rate": 1e-5,
+      "loss": "MSE",
+      "batch_size": 1,
+      "max_epochs": 200,
+      "early_stopping_patience": 50,
+      "checkpoint_selection": "minimum validation loss"
+    }
+  },
+  "stage2_multimodal": {
+    "asset": "ARPNetStageII_multimodal.pth",
+    "release": "v1.1.0",
+    "architecture": "dual 3D ResNet-18 + 8-d clinical vector; 1088 -> 1024 -> 512 -> 3",
+    "format": "payload with state_dict and clinical encoding metadata",
+    "actual_training_config": {
+      "loss": "weighted cross-entropy",
+      "class_weights": [1.0, 2.0, 4.0],
+      "encoder_freeze": "both encoders frozen",
+      "batch_size": 2,
+      "gradient_accumulation_steps": 8,
+      "effective_batch_size": 16,
+      "fusion_learning_rate": 3e-4,
+      "scheduler": "CosineAnnealingLR, T_max=400",
+      "checkpoint_selection": "best validation balanced accuracy",
+      "clinical_age_mean": 45.7620320855615,
+      "clinical_age_std": 13.05785366722619,
+      "note": "This is the released multimodal checkpoint. It was not trained with the paper's MSE/last-block fine-tuning configuration."
+    },
+    "paper_config": {
+      "optimizer": "Adam",
+      "learning_rate": 1e-5,
+      "loss": "MSE on softmax probabilities vs one-hot labels",
+      "batch_size": 4,
+      "max_epochs": 200,
+      "early_stopping_patience": 50,
+      "checkpoint_selection": "minimum validation loss",
+      "encoder_strategy": "freeze all encoder parameters except the last residual block (layer4)",
+      "oversampling": "training set only, fixed one-time random oversampling to 140 cases per class (420 entries)"
+    }
+  },
+  "stage2_image_only": {
+    "asset": "ARPNetStageII.pth",
+    "release": "v1.0.0",
+    "architecture": "dual 3D ResNet-18 + 1024 -> 256 -> 3 classifier, dropout 0.1",
+    "format": "raw PyTorch state_dict",
+    "actual_training_config": {
+      "note": "Legacy image-only control model. Training configuration is not fully documented in the released artifact."
+    },
+    "paper_config": {
+      "role": "image-only control model",
+      "architecture": "two 512-d image features; 1024 -> 256 -> 3; dropout 0.1"
+    }
+  }
+}
