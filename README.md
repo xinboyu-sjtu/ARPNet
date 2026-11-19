@@ -66,9 +66,9 @@ softmax probability (Class I, II or III) is the prediction.
 
 | Class | Definition |
 | --- | --- |
-| 0 | Implant placement without NBA |
-| 1 | Implant placement with simultaneous bone augmentation and/or osteotome sinus floor elevation (OSFE) |
-| 2 | Implant placement after complex bone augmentation (staged GBR or lateral sinus floor elevation) |
+| Class I (0) | Implant placement without NBA |
+| Class II (1) | Implant placement with simultaneous bone augmentation and/or osteotome sinus floor elevation |
+| Class III (2) | Implant placement after complex bone augmentation (staged guided bone regeneration or lateral sinus floor elevation) |
 
 **Multimodal Stage II head (Representative Model).** Tooth type (molar, premolar,
 incisor, canine; 4 one-hot values) and jaw (maxilla or mandible; 2 one-hot values)
